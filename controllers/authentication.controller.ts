@@ -4,13 +4,15 @@ import { User } from "../models/User.entity";
 import { ErrorResponse } from "../utils/errorResponse";
 import { hash, compare } from "../utils/bcryptService";
 import * as jwtService from "jsonwebtoken";
-import { randomUUID } from "crypto";
+import { createHash, randomBytes, randomUUID } from "crypto";
 import {
   insert,
   invalidate,
   InvalidateRefreshTokenError,
   validate,
 } from "../utils/refresh-token-ids.storage";
+import { createTransport } from "nodemailer";
+import { MoreThan } from "typeorm";
 
 // @desc      Register user
 // @route     POST /api/v1/auth/register
@@ -24,10 +26,95 @@ const register = asyncHandler(async (req, res, next) => {
   user.role = req.body.role;
   user.password = await hash(req.body.password);
 
+  // grab token and send to email:
+  const confirmEmailToken = await generateEmailConfirmToken(user);
+
+  // Create reset url
+  const confirmEmailURL = `${req.protocol}://${req.get(
+    "host"
+  )}/api/v1/auth/confirmemail?token=${confirmEmailToken}`;
+
+  const message = `You are receiving this email because you need to confirm your email address. Please make a GET request to: \n\n ${confirmEmailURL}`;
+
   await userRepo.save(user);
+
+  const transporter = createTransport({
+    host: "0.0.0.0",
+    port: 1025,
+  });
+
+  try {
+    await transporter.sendMail({
+      from: "from@example.com",
+      to: user.email,
+      subject: "Email Confirm token",
+      text: message,
+      html: `Click <a href="${confirmEmailURL}">here</a> to reset your password!`,
+    });
+
+    return res.status(200).json({
+      message: "Confirmation Email Sent!",
+    });
+  } catch (err) {
+    user.confirmEmailToken = null;
+    user.isEmailConfirmed = false;
+
+    await userRepo.save(user);
+
+    return next(new ErrorResponse("Email could not be sent", 401));
+  }
 
   return res.status(200).json({
     message: "Registered",
+  });
+});
+
+const generateEmailConfirmToken = async (user: User) => {
+  const confirmationToken = randomBytes(20).toString("hex");
+
+  user.confirmEmailToken = createHash("sha256")
+    .update(confirmationToken)
+    .digest("hex");
+
+  const confirmTokenExtend = randomBytes(100).toString("hex");
+  return `${confirmationToken}.${confirmTokenExtend}`;
+};
+
+// @desc      Confirm Email
+// @route     GET /api/v1/auth/confirmmail?token={TOKEN}
+// @access    Public
+const confirmEmail = asyncHandler(async (req, res, next) => {
+  const userRepo = AppDataSource.getRepository(User);
+  const { token } = req.query;
+
+  if (!token) {
+    return next(new ErrorResponse("Invalid", 401));
+  }
+
+  const splitToken = token.split(".")[0];
+
+  const confirmEmailToken = createHash("sha256")
+    .update(splitToken)
+    .digest("hex");
+
+  const user = await userRepo.findOne({
+    where: {
+      confirmEmailToken: confirmEmailToken,
+      isEmailConfirmed: false,
+    },
+  });
+
+  if (!user) {
+    return next(new ErrorResponse("User does not exist", 401));
+  }
+
+  user.confirmEmailToken = null;
+  user.isEmailConfirmed = true;
+
+  await userRepo.save(user);
+
+  return res.status(200).json({
+    message: "Email confirmed",
   });
 });
 
@@ -60,7 +147,7 @@ const logIn = asyncHandler(async (req, res, next) => {
 });
 
 // @desc      Refresh Tokens using Access Token
-// @route     GET /api/v1/auth/refresh-token
+// @route     POST /api/v1/auth/refresh-token
 // @access    Private
 const refreshToken = async (req, res, next) => {
   try {
@@ -118,6 +205,116 @@ const getMe = asyncHandler(async (req, res, next) => {
   });
 });
 
+// @desc      Forgot Password
+// @route     POST /api/v1/auth/me
+// @access    Public
+const forgotPass = asyncHandler(async (req, res, next) => {
+  const userRepo = AppDataSource.getRepository(User);
+
+  const user = await userRepo.findOneBy({
+    email: req.body.email,
+  });
+
+  const resetToken = randomBytes(20).toString("hex");
+  user.resetPasswordToken = createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+  // This one is for the un-hashed token version:
+  // const resetToken = Math.random().toString(20).substring(2, 12);
+  // user.resetPasswordToken = resetToken;
+
+  user.resetPasswordExpire = new Date(Date.now() + 10 * 60 * 1000);
+
+  await userRepo.save(user);
+
+  const transporter = createTransport({
+    host: "0.0.0.0",
+    port: 1025,
+  });
+
+  const resetUrl = `${req.protocol}://${req.get(
+    "host"
+  )}/api/v1/auth/resetpassword/${resetToken}`;
+
+  const message = `You are receiving this email because you (or someone else) has requested the reset of a password. Please make a PUT request to: \n\n ${resetUrl}`;
+
+  try {
+    await transporter.sendMail({
+      from: "from@example.com",
+      to: req.body.email,
+      subject: "Password reset token",
+      text: message,
+      html: `Click <a href="${resetUrl}">here</a> to reset your password!`,
+    });
+
+    return res.status(200).json({
+      message: "Email Sent with Password Reset URL!",
+    });
+  } catch (err) {
+    user.resetPasswordToken = null;
+    user.resetPasswordExpire = null;
+
+    await userRepo.save(user);
+
+    return next(new ErrorResponse("Email could not be sent", 401));
+  }
+});
+
+// @desc      Update Password
+// @route     PATCH /api/v1/auth/updatepassword
+// @access    PRIVATE
+const updatePass = asyncHandler(async (req, res, next) => {
+  const userRepo = AppDataSource.getRepository(User);
+  const user = req["user"];
+
+  const isEqual = await compare(req.body.currentPassword, user.password);
+
+  if (!isEqual) {
+    return next(new ErrorResponse("Invalid credentials", 401));
+  }
+
+  user.password = await hash(req.body.newPassword);
+
+  await userRepo.save(user);
+
+  return res.status(200).json({
+    message: "Password updated",
+  });
+});
+
+// @desc      Reset Password
+// @route     PATCH /api/v1/auth/resetpassword/{TOKEN}
+// @access    Public
+const resetPass = asyncHandler(async (req, res, next) => {
+  const userRepo = AppDataSource.getRepository(User);
+  const resetPasswordToken = createHash("sha256")
+    .update(req.params.resetToken)
+    .digest("hex");
+
+  const user = await userRepo.findOne({
+    where: {
+      // resetPasswordToken: resetToken,
+      resetPasswordToken: resetPasswordToken,
+      resetPasswordExpire: MoreThan(new Date(Date.now())),
+    },
+  });
+
+  if (!user) {
+    return next(new ErrorResponse("User does not exist", 401));
+  }
+
+  user.password = await hash(req.body.password);
+  user.resetPasswordToken = null;
+  user.resetPasswordExpire = null;
+
+  await userRepo.save(user);
+
+  return res.status(200).json({
+    message: "Password resetted!",
+  });
+});
+
 const generateTokens = async (user: User) => {
   const refreshTokenId = randomUUID();
 
@@ -157,4 +354,13 @@ const generateTokens = async (user: User) => {
   };
 };
 
-export { register, logIn, getMe, refreshToken };
+export {
+  register,
+  logIn,
+  getMe,
+  refreshToken,
+  confirmEmail,
+  forgotPass,
+  resetPass,
+  updatePass,
+};
