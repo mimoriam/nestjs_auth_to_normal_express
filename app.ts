@@ -45,6 +45,7 @@ import "reflect-metadata";
 
 // Route files:
 import { router as authRouter } from "./routes/auth.routes";
+import { User } from "./models/User.entity";
 
 export const AppDataSource = new DataSource({
   type: "postgres",
@@ -53,7 +54,7 @@ export const AppDataSource = new DataSource({
   username: process.env.PG_USER,
   password: process.env.PG_PASS,
   database: process.env.DATABASE,
-  entities: [],
+  entities: [User],
   subscribers: [],
   logging: false,
   // Turn this to false in production:
