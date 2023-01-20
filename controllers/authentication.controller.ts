@@ -13,6 +13,12 @@ import {
 } from "../utils/refresh-token-ids.storage";
 import { createTransport } from "nodemailer";
 import { MoreThan } from "typeorm";
+import {
+  enableTfaForUser,
+  generateSecret,
+  verifyCode,
+} from "./authentication.otp.controller";
+import { toFileStream } from "qrcode";
 
 // @desc      Register user
 // @route     POST /api/v1/auth/register
@@ -136,6 +142,14 @@ const logIn = asyncHandler(async (req, res, next) => {
 
   if (!isEqual) {
     return next(new ErrorResponse("Invalid credentials", 401));
+  }
+
+  if (user.isTfaEnabled) {
+    const isValid = await verifyCode(req.body.tfaCode, user.tfaSecret);
+
+    if (!isValid) {
+      return next(new ErrorResponse("Invalid 2FA Code", 401));
+    }
   }
 
   const { accessToken, refreshToken } = await generateTokens(user);
@@ -315,6 +329,16 @@ const resetPass = asyncHandler(async (req, res, next) => {
   });
 });
 
+const generateQrCode = asyncHandler(async (req, res, next) => {
+  const user = req["user"];
+  const { secret, uri } = await generateSecret(user.email);
+
+  await enableTfaForUser(user.email, secret);
+
+  res.type("png");
+  return toFileStream(res, uri);
+});
+
 const generateTokens = async (user: User) => {
   const refreshTokenId = randomUUID();
 
@@ -363,4 +387,5 @@ export {
   forgotPass,
   resetPass,
   updatePass,
+  generateQrCode,
 };
