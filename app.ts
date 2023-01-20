@@ -41,6 +41,8 @@ import { errorHandler } from "./middleware/errorHandler";
 
 import { DataSource } from "typeorm";
 
+import Redis from "ioredis";
+
 import "reflect-metadata";
 
 // Route files:
@@ -59,6 +61,11 @@ export const AppDataSource = new DataSource({
   logging: false,
   // Turn this to false in production:
   synchronize: true,
+});
+
+export const redisClient = new Redis({
+  host: "localhost",
+  port: 6379,
 });
 
 // Initialize DB:
@@ -86,4 +93,9 @@ app.use(errorHandler);
 // Listening on a specific port:
 app.listen(PORT || 3000, () => {
   console.log(`Listening on port: ${PORT}`);
+});
+
+process.on('exit', function () {
+  redisClient.quit();
+  console.log('About to exit.');
 });
